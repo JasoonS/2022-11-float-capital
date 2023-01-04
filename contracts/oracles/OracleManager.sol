@@ -34,7 +34,7 @@ contract OracleManager is IOracleManager {
     ╚═════════════════════════════╝*/
 
   /// @notice Thrown when no phase ID is in the mapping
-  error roundIdOfLastPriceBeforePhaseStartBeforePhaseStartNotSet(uint16 phaseId);
+  error RoundIdOfLastPriceBeforePhaseStartNotSet(uint16 phaseId);
 
   /*╔═════════════════════════════╗
     ║        Construction         ║
@@ -166,7 +166,7 @@ contract OracleManager is IOracleManager {
           (, , previousOracleUpdateTimestamp, , ) = chainlinkOracle.getRoundData(roundIdOfLastPriceBeforePhaseStart[newPhaseId]);
           assert(previousOracleUpdateTimestamp != 0);
         } else {
-          revert roundIdOfLastPriceBeforePhaseStartBeforePhaseStartNotSet({phaseId: newPhaseId});
+          revert RoundIdOfLastPriceBeforePhaseStartNotSet({phaseId: newPhaseId});
         }
       }
 
