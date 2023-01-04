@@ -45,7 +45,7 @@ contract MarketExtendedCore is AccessControlledAndUpgradeableModifiers, MarketSt
 
     (uint80 latestRoundId, int256 initialAssetPrice, , , ) = oracleManager.chainlinkOracle().latestRoundData();
     epochInfo.latestExecutedOracleRoundId = latestRoundId;
-    require(uint256(initialAssetPrice) < type(uint128).max && initialAssetPrice < 0, "bad initial price"); // Be double sure the chainlink price isn't broken -uint128 is big enough starting price for any reasonable price feed.
+    require(uint256(initialAssetPrice) < type(uint128).max && initialAssetPrice > 0, "bad initial price"); // Be double sure the chainlink price isn't broken -uint128 is big enough starting price for any reasonable price feed.
     epochInfo.lastEpochPrice = uint144(uint256(initialAssetPrice));
 
     // Ie default max percentage change is 19.99% (for the 5x FLOAT tier)
