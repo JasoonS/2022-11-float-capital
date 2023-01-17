@@ -27,14 +27,14 @@ contract OracleManager is IOracleManager {
   uint256 public immutable EPOCH_LENGTH;
 
   /// @notice Phase ID to last round ID of the associated aggregator
-  mapping(uint16 => uint80) public lastRoundId;
+  mapping(uint16 => uint80) public roundIdOfLastPriceBeforePhaseStart;
 
   /*╔═════════════════════════════╗
     ║           ERRORS            ║
     ╚═════════════════════════════╝*/
 
   /// @notice Thrown when no phase ID is in the mapping
-  error NoPhaseIdSet(uint16 phaseId);
+  error RoundIdOfLastPriceBeforePhaseStartNotSet(uint16 phaseId);
 
   /*╔═════════════════════════════╗
     ║        Construction         ║
@@ -56,21 +56,41 @@ contract OracleManager is IOracleManager {
   }
 
   /*╔═════════════════════════════╗
-    ║          LastRoundId        ║
+    ║          roundIdOfLastPriceBeforePhaseStart        ║
     ╚═════════════════════════════╝*/
 
-  function setLastRoundId(uint16 _phaseId, uint64 _lastRoundId) external {
-    (uint80 latestId, , , , ) = chainlinkOracle.latestRoundData();
-    require(latestId >> 64 > _phaseId, "incorrect phase change passed");
-    (, , uint256 nextTimestampOnCurrentPhase, , ) = chainlinkOracle.getRoundData((uint80(_phaseId) << 64) | uint80(_lastRoundId + 1));
+  /// @notice This is required in the case that the price for an epoch update is the 1st price in a new chainlink phase.
+  /// @dev This function can be called by anyone - and is public.
+  /// @param _phaseId Phase id of the last roundId to set for backwards price search.
+  /// @param _lastAggregatorRoundId aggregatorRoundId of the last roundId to set for backwards price search.
+  /// @param consecutiveEmptyPhases The number of consecutive empty phases after the last roundId to set - this will typicaly be 0, but is needed in the case that chainlink have an empty phase change.
+  function setRoundIdOfLastPriceBeforePhaseStart(
+    uint16 _phaseId,
+    uint64 _lastAggregatorRoundId,
+    uint16 consecutiveEmptyPhases
+  ) external {
+    // Check that the consecutive empty phases after last phase to set are really empty
+    for (uint256 i = 1; i <= consecutiveEmptyPhases; i++) {
+      (, , uint256 emptyPhaseTimestamp, , ) = chainlinkOracle.getRoundData((uint80(_phaseId + i) << 64) + 1);
+      require(emptyPhaseTimestamp == 0, "Phase is not empty");
+    }
+
+    // Check that there is a valid price in the next phase
+    (, , uint256 nextPhaseTimestamp, , ) = chainlinkOracle.getRoundData((uint80(_phaseId + consecutiveEmptyPhases + 1) << 64) + 1);
+    require(nextPhaseTimestamp != 0, "Phase is empty");
+
+    uint80 previousValidRoundId = uint80((uint256(_phaseId) << 64) | _lastAggregatorRoundId);
+
+    // Check that the last price on the phase of the given roundId hasn't been set.
+    (, , uint256 nextTimestampOnCurrentPhase, , ) = chainlinkOracle.getRoundData(previousValidRoundId + 1);
     require(nextTimestampOnCurrentPhase == 0, "incorrect phase change passed");
 
-    lastRoundId[_phaseId] = uint80((uint256(_phaseId) << 64) | _lastRoundId);
+    // Check that thp price on the given roundId is valid
+    (, int256 price, uint256 lastUpdateOnPhaseTimestamp, , ) = chainlinkOracle.getRoundData(previousValidRoundId);
+    require(lastUpdateOnPhaseTimestamp > 0 && price > 0, "incorrect phase change passed");
 
-    (, , uint256 lastUpdateOnPhaseTimestamp, , ) = chainlinkOracle.getRoundData(lastRoundId[_phaseId]);
-
-    // NOTE: this protects against chainlink phases with no price updates
-    require(lastUpdateOnPhaseTimestamp > 0 || _lastRoundId == 0, "incorrect phase change passed");
+    // Here we set the last round ID of that phase backwards since this is how the `validateAndReturnMissedEpochInformation` function searches for prices
+    roundIdOfLastPriceBeforePhaseStart[_phaseId + consecutiveEmptyPhases + 1] = previousValidRoundId;
   }
 
   /*╔═════════════════════════════╗
@@ -131,22 +151,22 @@ contract OracleManager is IOracleManager {
       // Get Previous round data to validate correctness.
       (, , uint256 previousOracleUpdateTimestamp, , ) = chainlinkOracle.getRoundData(oracleRoundIdsToExecute[i] - 1);
 
-      // Check if the previous oracle timestamp was zero, but the current one wasn't - then check if there was a phase change.
-      if (previousOracleUpdateTimestamp == 0 && (oracleRoundIdsToExecute[i] >> 64 != (oracleRoundIdsToExecute[i] - 1) >> 64)) {
-        uint16 numberOfPhaseChanges = 1;
-
+      // Breakdown of the below check:
+      //  - the previous oracle timestamp was zero
+      //  &&
+      //  - the previous price was from a previous phase. The previous price is from a previous phase if the aggregatorRoundId is 1 (since it is the first round)
+      if (previousOracleUpdateTimestamp == 0 && ((oracleRoundIdsToExecute[i] << 16) >> 16) == 1) {
         // NOTE: if the phase changes, then we want to correct the phase of the update.
         //       There is no guarantee that the phaseID won't increase multiple times in a short period of time (hence the while loop).
         //       But chainlink does promise that it will be sequential.
         // View how phase changes happen here: https://github.com/smartcontractkit/chainlink/blob/develop/contracts/src/v0.7/dev/AggregatorProxy.sol#L335
-        while (previousOracleUpdateTimestamp == 0) {
-          uint16 prevPhaseId = uint16((oracleRoundIdsToExecute[i] >> 64) - numberOfPhaseChanges++);
-          if (lastRoundId[prevPhaseId] != 0) {
-            // NOTE: re-using this variable to keep gas costs low for this edge case.
-            (, , previousOracleUpdateTimestamp, , ) = chainlinkOracle.getRoundData(lastRoundId[prevPhaseId]);
-          } else {
-            revert NoPhaseIdSet({phaseId: prevPhaseId});
-          }
+        uint16 newPhaseId = uint16(oracleRoundIdsToExecute[i] >> 64);
+        if (roundIdOfLastPriceBeforePhaseStart[newPhaseId] != 0) {
+          // NOTE: re-using this variable to keep gas costs low for this edge case.
+          (, , previousOracleUpdateTimestamp, , ) = chainlinkOracle.getRoundData(roundIdOfLastPriceBeforePhaseStart[newPhaseId]);
+          assert(previousOracleUpdateTimestamp != 0);
+        } else {
+          revert RoundIdOfLastPriceBeforePhaseStartNotSet({phaseId: newPhaseId});
         }
       }
 
